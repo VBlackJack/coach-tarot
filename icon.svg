@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title">
+  <title id="title">Coach Tarot</title>
+  <defs>
+    <linearGradient id="bg" x1="88" y1="48" x2="430" y2="464" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#252b49"/>
+      <stop offset=".58" stop-color="#151a2d"/>
+      <stop offset="1" stop-color="#0f3d40"/>
+    </linearGradient>
+    <linearGradient id="cardEdge" x1="148" y1="78" x2="364" y2="420" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#a6b2ff"/>
+      <stop offset="1" stop-color="#2ab9c8"/>
+    </linearGradient>
+    <filter id="shadow" x="56" y="48" width="400" height="420" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="18" stdDeviation="18" flood-color="#030712" flood-opacity=".45"/>
+    </filter>
+  </defs>
+
+  <rect width="512" height="512" rx="108" fill="url(#bg)"/>
+  <circle cx="256" cy="262" r="198" fill="#1b1f33" opacity=".72"/>
+  <circle cx="256" cy="262" r="198" fill="none" stroke="#2ab9c8" stroke-width="5" opacity=".36"/>
+
+  <g filter="url(#shadow)">
+    <rect x="100" y="130" width="184" height="278" rx="30" fill="#2a3050" stroke="#63a6ff" stroke-width="12" transform="rotate(-13 192 269)"/>
+    <rect x="228" y="126" width="184" height="278" rx="30" fill="#242a47" stroke="#db9155" stroke-width="12" transform="rotate(12 320 265)"/>
+    <rect x="148" y="78" width="216" height="342" rx="34" fill="#f8f3e4" stroke="url(#cardEdge)" stroke-width="14"/>
+
+    <path d="M206 156c23-27 66-27 90 0 18 21 16 53-6 72l-34 30-34-30c-22-19-24-51-6-72z" fill="#e47fac"/>
+    <circle cx="256" cy="235" r="22" fill="#1b1f33" opacity=".12"/>
+    <text x="256" y="342" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="92" font-weight="900" fill="#1b1f33">21</text>
+    <path d="M194 372h124" stroke="#db9155" stroke-width="12" stroke-linecap="round"/>
+  </g>
+
+  <g>
+    <path d="M333 93h42c34 0 62 27 62 61s-28 61-62 61h-19l-34 31 8-37c-35-9-59-30-59-55 0-34 28-61 62-61z" fill="#2ab9c8"/>
+    <path d="M333 93h42c34 0 62 27 62 61s-28 61-62 61h-19l-34 31 8-37c-35-9-59-30-59-55 0-34 28-61 62-61z" fill="none" stroke="#8c9cff" stroke-width="10" stroke-linejoin="round"/>
+    <path d="M320 154l28 28 49-60" fill="none" stroke="#101421" stroke-width="18" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+
+  <path d="M107 91l13 29 31 4-23 21 6 31-27-16-27 16 6-31-23-21 31-4 13-29z" fill="#db9155"/>
+</svg>
