@@ -2,6 +2,8 @@
 
 Coach Tarot est une application web autonome pour apprendre le Tarot français, travailler les règles de pli et jouer des donnes complètes contre l'ordinateur.
 
+Jouer en ligne: https://vblackjack.github.io/coach-tarot/
+
 ## Fonctionnalités
 
 - Exercices guidés pour comprendre les règles de fourniture, coupe, surcoupe et défausse.
