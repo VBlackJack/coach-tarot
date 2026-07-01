@@ -172,6 +172,55 @@ assert.strictEqual(trainer.targetForBouts(0), 56);
 assert.strictEqual(trainer.targetForBouts(1), 51);
 assert.strictEqual(trainer.targetForBouts(2), 41);
 assert.strictEqual(trainer.targetForBouts(3), 36);
+assert.strictEqual(trainer.scoringTakerPoints(29.5, 41), 29, "half point should go to defense when taker fails");
+assert.strictEqual(trainer.scoringTakerPoints(41.5, 41), 42, "half point should go to taker when taker succeeds");
+
+const halfPointScoreGame = {
+  playerCount: 3,
+  players: [createPlayer("Ouest", "taker"), createPlayer("Vous", "defense"), createPlayer("Est", "defense")],
+  taker: 0,
+  contract: { name: "Garde contre le chien", multiplier: 6 },
+  handfuls: [],
+  petitAuBout: null,
+};
+halfPointScoreGame.players[0].won = [trainer.cardById("trump-1"), trainer.cardById("trump-21")];
+halfPointScoreGame.players[0].points = 29.5;
+halfPointScoreGame.players[1].points = 40;
+halfPointScoreGame.players[2].points = 21.5;
+halfPointScoreGame.finalScore = trainer.calculateFinalScore(halfPointScoreGame);
+assert.strictEqual(halfPointScoreGame.finalScore.scoredTakerPoints, 29, "failed half-point contract should count down");
+assert.strictEqual(halfPointScoreGame.finalScore.delta, -12, "29.5 against 41 should be scored as -12");
+assert.strictEqual(halfPointScoreGame.finalScore.signedScore, -222, "garde contre failed by 12 should score 222 per defender");
+assert.strictEqual(trainer.playerFinalScore(halfPointScoreGame, 0), -444, "three-player taker pays both defenders");
+assert.strictEqual(trainer.playerFinalScore(halfPointScoreGame, 1), 222, "defender should see a positive winning score");
+
+const takerHandfulFailGame = {
+  playerCount: 4,
+  players: [createPlayer("Preneur", "taker"), createPlayer("Est", "defense"), createPlayer("Nord", "defense"), createPlayer("Ouest", "defense")],
+  taker: 0,
+  contract: { name: "Petite", multiplier: 1 },
+  handfuls: [{ player: 0, level: "poignée", bonus: 20 }],
+  petitAuBout: null,
+};
+takerHandfulFailGame.players[0].won = [trainer.cardById("trump-1"), trainer.cardById("trump-21")];
+takerHandfulFailGame.players[0].points = 40;
+const takerHandfulFailScore = trainer.calculateFinalScore(takerHandfulFailGame);
+assert.strictEqual(takerHandfulFailScore.handfulBonus, -20, "handful bonus should go to winning defense when taker fails");
+assert.strictEqual(takerHandfulFailScore.signedScore, -46, "failed petite by 1 with a handful should include the losing handful penalty");
+
+const defenseHandfulTakerWinGame = {
+  playerCount: 4,
+  players: [createPlayer("Preneur", "taker"), createPlayer("Est", "defense"), createPlayer("Nord", "defense"), createPlayer("Ouest", "defense")],
+  taker: 0,
+  contract: { name: "Petite", multiplier: 1 },
+  handfuls: [{ player: 1, level: "poignée", bonus: 20 }],
+  petitAuBout: null,
+};
+defenseHandfulTakerWinGame.players[0].won = [trainer.cardById("trump-1"), trainer.cardById("trump-21")];
+defenseHandfulTakerWinGame.players[0].points = 41;
+const defenseHandfulTakerWinScore = trainer.calculateFinalScore(defenseHandfulTakerWinGame);
+assert.strictEqual(defenseHandfulTakerWinScore.handfulBonus, 20, "handful bonus should go to winning taker even if defense announced it");
+assert.strictEqual(defenseHandfulTakerWinScore.signedScore, 45, "just-made petite with defender handful should add 20 to taker score");
 
 const finalGame = trainer.createScenarioGame(0);
 finalGame.players[0].won = [

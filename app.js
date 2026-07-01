@@ -273,6 +273,7 @@ const state = {
   learning: {
     scenarioIndex: 0,
     selectedCardId: null,
+    inspectedIllegalCard: null,
     analyses: [],
     attempts: [],
   },
@@ -456,6 +457,8 @@ function defaultSettings() {
     sideTab: "coach",
     sidePanel: "actions",
     navCollapsed: false,
+    sidePanelCollapsed: false,
+    cardSize: "normal",
   };
 }
 
@@ -523,7 +526,11 @@ function sanitizeSettings(input = {}) {
   if (!SIDE_PANELS.some((panel) => panel.id === settings.sidePanel)) {
     settings.sidePanel = defaultSettings().sidePanel;
   }
+  if (!["normal", "large"].includes(settings.cardSize)) {
+    settings.cardSize = defaultSettings().cardSize;
+  }
   settings.navCollapsed = Boolean(settings.navCollapsed);
+  settings.sidePanelCollapsed = Boolean(settings.sidePanelCollapsed);
   return settings;
 }
 
@@ -762,6 +769,9 @@ function sanitizeStoredFinalScore(score, game) {
   if (!score || typeof score !== "object") {
     return null;
   }
+  if (game?.contract) {
+    return calculateFinalScore(game);
+  }
 
   const winnerTeam = score.winnerTeam === "taker" ? "taker" : "defense";
   return {
@@ -770,6 +780,8 @@ function sanitizeStoredFinalScore(score, game) {
     multiplier: finiteNumber(score.multiplier, game.contract?.multiplier || 1),
     takerPoints: finiteNumber(score.takerPoints, teamPoints(game, "taker")),
     defensePoints: finiteNumber(score.defensePoints, teamPoints(game, "defense")),
+    scoredTakerPoints: finiteNumber(score.scoredTakerPoints, score.takerPoints ?? teamPoints(game, "taker")),
+    scoredDefensePoints: finiteNumber(score.scoredDefensePoints, score.defensePoints ?? teamPoints(game, "defense")),
     bouts: nonNegativeInteger(score.bouts, countBouts(teamCards(game, "taker"))),
     target: finiteNumber(score.target, 0),
     delta: finiteNumber(score.delta, 0),
@@ -861,6 +873,42 @@ function sanitizeStoredGame(rawGame, kind) {
     hintSelectedId: typeof rawGame.hintSelectedId === "string" ? rawGame.hintSelectedId : null,
     hintTitle: typeof rawGame.hintTitle === "string" ? rawGame.hintTitle.slice(0, 80) : null,
     feedback: typeof rawGame.feedback === "string" ? rawGame.feedback.slice(0, 220) : "",
+    lastUserFeedback:
+      rawGame.lastUserFeedback && typeof rawGame.lastUserFeedback === "object"
+        ? {
+            tone: ["success", "warning", "danger", "info"].includes(rawGame.lastUserFeedback.tone)
+              ? rawGame.lastUserFeedback.tone
+              : "info",
+            title:
+              typeof rawGame.lastUserFeedback.title === "string"
+                ? rawGame.lastUserFeedback.title.slice(0, 80)
+                : "Retour du coach",
+            detail:
+              typeof rawGame.lastUserFeedback.detail === "string"
+                ? rawGame.lastUserFeedback.detail.slice(0, 220)
+                : "",
+            playedId:
+              typeof rawGame.lastUserFeedback.playedId === "string" ? rawGame.lastUserFeedback.playedId : null,
+            bestId: typeof rawGame.lastUserFeedback.bestId === "string" ? rawGame.lastUserFeedback.bestId : null,
+            score: Math.max(0, Math.min(100, Math.round(finiteNumber(rawGame.lastUserFeedback.score, 0)))),
+            trickNumber: Math.max(1, nonNegativeInteger(rawGame.lastUserFeedback.trickNumber, 1)),
+          }
+        : null,
+    inspectedIllegalCard:
+      rawGame.inspectedIllegalCard && typeof rawGame.inspectedIllegalCard === "object"
+        ? {
+            cardId: typeof rawGame.inspectedIllegalCard.cardId === "string" ? rawGame.inspectedIllegalCard.cardId : null,
+            title:
+              typeof rawGame.inspectedIllegalCard.title === "string"
+                ? rawGame.inspectedIllegalCard.title.slice(0, 80)
+                : "Carte non jouable",
+            reason:
+              typeof rawGame.inspectedIllegalCard.reason === "string"
+                ? rawGame.inspectedIllegalCard.reason.slice(0, 220)
+                : "",
+          }
+        : null,
+    beginnerDeal: Boolean(rawGame.beginnerDeal),
     finalScore: null,
     calledCard: reviveStoredCard(rawGame.calledCard),
     calledPlayer:
@@ -952,9 +1000,9 @@ function recordGameFinished(game) {
     state.stats.userWins += 1;
   }
 
-  state.stats.cumulativeTakerScore += game.finalScore.signedScore;
-  state.stats.cumulativeDefenseScore -= game.finalScore.signedScore;
-  state.stats.cumulativeUserScore += game.players[0]?.team === "taker" ? game.finalScore.signedScore : -game.finalScore.signedScore;
+  state.stats.cumulativeTakerScore += playerFinalScore(game, game.taker);
+  state.stats.cumulativeDefenseScore += campFinalScore(game, "defense");
+  state.stats.cumulativeUserScore += playerFinalScore(game, 0);
 
   const reviews = userChoiceReviews(game);
   state.stats.analyzedGameChoices += reviews.length;
@@ -1167,6 +1215,9 @@ function createNewGame(kind, playerCount = state.settings.playerCount) {
     hintSelectedId: null,
     hintTitle: null,
     feedback: "",
+    lastUserFeedback: null,
+    inspectedIllegalCard: null,
+    beginnerDeal: false,
     finalScore: null,
   };
 
@@ -1271,6 +1322,9 @@ function createDogTestGame(kind, playerCount = state.settings.playerCount) {
     hintSelectedId: null,
     hintTitle: null,
     feedback: "Donne de test chien activée: annonce Petite ou Garde, les adversaires passeront.",
+    lastUserFeedback: null,
+    inspectedIllegalCard: null,
+    beginnerDeal: false,
     finalScore: null,
   };
 
@@ -1323,6 +1377,9 @@ function createScenarioGame(index) {
     hintSelectedId: null,
     hintTitle: null,
     feedback: "",
+    lastUserFeedback: null,
+    inspectedIllegalCard: null,
+    beginnerDeal: false,
     finalScore: null,
   };
 }
@@ -1737,6 +1794,13 @@ function targetForBouts(bouts) {
   return 36;
 }
 
+function scoringTakerPoints(takerPoints, target) {
+  if (Number.isInteger(takerPoints)) {
+    return takerPoints;
+  }
+  return takerPoints >= target ? Math.ceil(takerPoints) : Math.floor(takerPoints);
+}
+
 function detectHandfuls(players, playerCount = 4) {
   const thresholds = HANDFUL_THRESHOLDS[playerCount] || HANDFUL_THRESHOLDS[4];
   return players
@@ -1799,18 +1863,15 @@ function calculateFinalScore(game) {
   const defensePoints = teamPoints(game, "defense");
   const bouts = countBouts(takerCards);
   const target = targetForBouts(bouts);
-  const delta = takerPoints - target;
+  const scoredTakerPoints = scoringTakerPoints(takerPoints, target);
+  const scoredDefensePoints = 91 - scoredTakerPoints;
+  const delta = scoredTakerPoints - target;
   const contractScore = (25 + Math.abs(delta)) * game.contract.multiplier;
   const petitBonus = game.petitAuBout
     ? (game.petitAuBout.team === "taker" ? 1 : -1) * 10 * game.contract.multiplier
     : 0;
-  const takerHandfulBonus = (game.handfuls || [])
-    .filter((handful) => game.players[handful.player].team === "taker")
-    .reduce((sum, handful) => sum + handful.bonus, 0);
-  const defenseHandfulBonus = (game.handfuls || [])
-    .filter((handful) => game.players[handful.player].team === "defense")
-    .reduce((sum, handful) => sum + handful.bonus, 0);
-  const handfulBonus = takerHandfulBonus - defenseHandfulBonus;
+  const totalHandfulBonus = (game.handfuls || []).reduce((sum, handful) => sum + handful.bonus, 0);
+  const handfulBonus = (delta >= 0 ? 1 : -1) * totalHandfulBonus;
   const signedScore = (delta >= 0 ? 1 : -1) * contractScore + petitBonus + handfulBonus;
   const winnerTeam = delta >= 0 ? "taker" : "defense";
 
@@ -1820,6 +1881,8 @@ function calculateFinalScore(game) {
     multiplier: game.contract.multiplier,
     takerPoints,
     defensePoints,
+    scoredTakerPoints,
+    scoredDefensePoints,
     bouts,
     target,
     delta,
@@ -1830,6 +1893,33 @@ function calculateFinalScore(game) {
     success: delta >= 0,
     winnerTeam,
   };
+}
+
+function playerFinalScore(game, playerIndex) {
+  const final = game.finalScore;
+  const player = game.players[playerIndex];
+  if (!final || !player) {
+    return 0;
+  }
+  if (player.team === "defense") {
+    return -final.signedScore;
+  }
+
+  const defenseCount = game.players.filter((seat) => seat.team === "defense").length;
+  const takerTeamCount = game.players.filter((seat) => seat.team === "taker").length;
+  if (takerTeamCount <= 1) {
+    return final.signedScore * defenseCount;
+  }
+  return playerIndex === game.taker ? final.signedScore * 2 : final.signedScore;
+}
+
+function campFinalScore(game, team) {
+  return game.players.reduce((sum, player, index) => {
+    if (player.team !== team) {
+      return sum;
+    }
+    return sum + playerFinalScore(game, index);
+  }, 0);
 }
 
 function resolveTrick(game) {
@@ -2495,6 +2585,86 @@ function chooseOpponentBid(game, playerIndex) {
   return desired;
 }
 
+function desiredBidForStrength(strength) {
+  if (strength >= 31) {
+    return "gardeContre";
+  }
+  if (strength >= 27) {
+    return "gardeSans";
+  }
+  if (strength >= 22) {
+    return "garde";
+  }
+  if (strength >= 17) {
+    return "petite";
+  }
+  return PASS_BID;
+}
+
+function biddingAdvice(game, playerIndex = 0) {
+  const hand = game.players[playerIndex].hand;
+  const trumps = hand.filter((card) => card.type === "trump");
+  const bouts = hand.filter((card) => card.bout).length;
+  const kings = hand.filter((card) => card.rank === "R").length;
+  const queens = hand.filter((card) => card.rank === "D").length;
+  const highTrumps = trumps.filter((card) => card.strength >= 16).length;
+  const lowCards = hand.filter((card) => card.type === "suit" && card.points === 0.5).length;
+  const suitCounts = SUITS.map((suit) => ({
+    suit,
+    count: hand.filter((card) => card.suit === suit.id).length,
+  })).sort((a, b) => b.count - a.count);
+  const longestSuit = suitCounts[0];
+  const strength = evaluateHandForBid(hand);
+  const desired = desiredBidForStrength(strength);
+  const options = nextContractOptions(game.bidding.highestContractId);
+  let recommended = PASS_BID;
+
+  if (desired !== PASS_BID) {
+    recommended = options.includes(desired)
+      ? desired
+      : [...options].reverse().find((contractId) => contractRank(contractId) <= contractRank(desired)) || PASS_BID;
+  }
+
+  const reasons = [];
+  if (bouts > 0) {
+    reasons.push(`${bouts} bout${bouts > 1 ? "s" : ""}: gros levier pour abaisser l'objectif de points.`);
+  }
+  if (trumps.length >= 7) {
+    reasons.push(`${trumps.length} atouts: bonne capacité à contrôler les plis.`);
+  } else if (trumps.length <= 4) {
+    reasons.push(`${trumps.length} atouts seulement: prudence, le contrôle sera limité.`);
+  }
+  if (highTrumps > 0) {
+    reasons.push(`${highTrumps} gros atout${highTrumps > 1 ? "s" : ""} utile${highTrumps > 1 ? "s" : ""} pour reprendre la main.`);
+  }
+  if (kings > 0) {
+    reasons.push(`${kings} roi${kings > 1 ? "s" : ""}: points solides à protéger ou valoriser.`);
+  }
+  if (queens >= 2) {
+    reasons.push(`${queens} dames: potentiel de points, mais elles restent exposées sans tenue.`);
+  }
+  if (longestSuit?.count >= 5) {
+    reasons.push(`Longue à ${longestSuit.suit.name}: ${longestSuit.count} cartes, utile pour construire un plan.`);
+  }
+  if (lowCards >= 7) {
+    reasons.push(`${lowCards} petites cartes: le chien peut aider à nettoyer la main.`);
+  }
+  if (recommended === PASS_BID && strength < 17) {
+    reasons.push("La main paraît trop courte pour ouvrir sans chien connu.");
+  } else if (recommended === PASS_BID) {
+    reasons.push("L'enchère actuelle est au-dessus de la force estimée de la main.");
+  }
+
+  return {
+    strength,
+    desired,
+    recommended,
+    options,
+    reasons: reasons.slice(0, 5),
+    stats: { trumps: trumps.length, bouts, kings, highTrumps },
+  };
+}
+
 function nextBidder(game, fromPlayer) {
   for (let offset = 1; offset <= game.players.length; offset += 1) {
     const candidate = (fromPlayer + offset) % game.players.length;
@@ -2791,10 +2961,33 @@ function setMode(mode) {
   scheduleOpponents();
 }
 
+function startFirstGame() {
+  cancelOpponentTimer();
+  state.mode = "guided";
+  state.settings.playerCount = 4;
+  state.settings.opponentSpeed = "slow";
+  state.settings.coachMode = "full";
+  state.settings.cardSize = "large";
+  state.settings.sidePanel = "actions";
+  state.settings.navCollapsed = true;
+  state.stats.lastMode = "guided";
+  state.message = "";
+  const game = createNewGame("guided", 4);
+  game.beginnerDeal = true;
+  game.feedback = "Première partie: laissez-vous guider étape par étape, sans chercher à tout mémoriser.";
+  game.log.unshift("Parcours première partie lancé.");
+  state.games.guided = game;
+  saveProgress();
+  render();
+  resetScrollPosition();
+  scheduleOpponents();
+}
+
 function restartCurrent() {
   cancelOpponentTimer();
   if (state.mode === "learn") {
     state.learning.selectedCardId = null;
+    state.learning.inspectedIllegalCard = null;
     state.learning.analyses = [];
   }
   if (state.mode === "guided" || state.mode === "versus") {
@@ -2867,8 +3060,23 @@ function setCoachMode(mode) {
   render();
 }
 
+function setCardSize(size) {
+  if (!["normal", "large"].includes(size)) {
+    return;
+  }
+  state.settings.cardSize = size;
+  saveProgress();
+  render();
+}
+
 function toggleNavigation() {
   state.settings.navCollapsed = !state.settings.navCollapsed;
+  saveProgress();
+  render();
+}
+
+function toggleSidePanelCollapsed() {
+  state.settings.sidePanelCollapsed = !state.settings.sidePanelCollapsed;
   saveProgress();
   render();
 }
@@ -3031,11 +3239,18 @@ function toggleDiscard(cardId) {
   const requiredDiscard = game.dogSize || 6;
   const legal = new Set(discardableCards(hand, requiredDiscard).map((card) => card.id));
   if (!legal.has(cardId)) {
-    game.feedback = "Cette carte ne peut pas aller à l'écart tant qu'une carte plus faible est disponible.";
+    const card = hand.find((item) => item.id === cardId);
+    game.inspectedIllegalCard = {
+      cardId,
+      title: card ? `${cardName(card)} est protégée` : "Carte protégée",
+      reason: "Cette carte ne peut pas aller à l'écart tant qu'une carte plus faible est disponible.",
+    };
+    game.feedback = "Carte protégée pour l'écart.";
     render();
     return;
   }
 
+  game.inspectedIllegalCard = null;
   if (game.selectedDiscard.includes(cardId)) {
     game.selectedDiscard = game.selectedDiscard.filter((id) => id !== cardId);
   } else if (game.selectedDiscard.length < requiredDiscard) {
@@ -3103,11 +3318,18 @@ function playUserCard(cardId) {
   }
 
   if (!isLegalCard(card, game.players[0].hand, game.trick)) {
-    game.feedback = `${cardName(card)} est non jouable: ${illegalReason(card, game.players[0].hand, game.trick)}`;
+    const reason = illegalReason(card, game.players[0].hand, game.trick);
+    game.inspectedIllegalCard = {
+      cardId: card.id,
+      title: `${cardName(card)} est bloquée`,
+      reason,
+    };
+    game.feedback = "Carte bloquée.";
     render();
     return;
   }
 
+  game.inspectedIllegalCard = null;
   const before = bestAnalysis(game, 0, 54, { perfectKnowledge: false });
   const playedAnalysis = before.find((analysis) => analysis.card.id === card.id);
   if (playedAnalysis && before[0]) {
@@ -3126,12 +3348,15 @@ function playUserCard(cardId) {
 
   if ((state.mode === "guided" || state.mode === "versus") && playedAnalysis && coachAllowsReview()) {
     const best = before[0];
-    const gap = best.score - playedAnalysis.score;
-    if (gap <= 6) {
-      game.feedback = `Bon choix: ${playedAnalysis.headline}.`;
-    } else {
-      game.feedback = `Coach: ${cardName(best.card)} était mieux évaluée (${best.score} contre ${playedAnalysis.score}).`;
-    }
+    game.lastUserFeedback = feedbackFromAnalysis(playedAnalysis, best);
+    game.lastUserFeedback.trickNumber = game.trickNumber;
+    game.feedback =
+      game.lastUserFeedback.tone === "success"
+        ? `Bon choix: ${playedAnalysis.headline}.`
+        : `Coach: ${cardName(best.card)} était mieux évaluée (${best.score} contre ${playedAnalysis.score}).`;
+  } else {
+    game.lastUserFeedback = feedbackFromAnalysis(playedAnalysis, before[0]);
+    game.lastUserFeedback.trickNumber = game.trickNumber;
   }
 
   saveProgress();
@@ -3147,6 +3372,9 @@ function requestHint() {
   game.hint = bestAnalysis(game, 0, 90, { perfectKnowledge: false });
   game.hintSelectedId = game.hint[0]?.card.id || null;
   game.hintTitle = "Aide avant de jouer";
+  game.inspectedIllegalCard = null;
+  game.feedback = "";
+  state.settings.sidePanel = "coach";
   saveProgress();
   render();
 }
@@ -3162,8 +3390,25 @@ function selectGameHint(cardId) {
 }
 
 function selectLearningCard(cardId, countAttempt = true) {
-  state.learning.selectedCardId = cardId;
   const scenarioGame = createScenarioGame(state.learning.scenarioIndex);
+  const card = scenarioGame.players[0].hand.find((item) => item.id === cardId);
+  const legalCards = new Set(getLegalCards(scenarioGame.players[0].hand, scenarioGame.trick).map((item) => item.id));
+  if (!card || !legalCards.has(cardId)) {
+    state.learning.selectedCardId = null;
+    state.learning.inspectedIllegalCard = card
+      ? {
+          cardId,
+          title: `${cardName(card)} est bloquée`,
+          reason: illegalReason(card, scenarioGame.players[0].hand, scenarioGame.trick),
+        }
+      : null;
+    state.learning.analyses = [];
+    render();
+    return;
+  }
+
+  state.learning.selectedCardId = cardId;
+  state.learning.inspectedIllegalCard = null;
   state.learning.analyses = bestAnalysis(scenarioGame, 0, 96, { perfectKnowledge: true });
   if (countAttempt) {
     recordLearningAttempt(state.learning.analyses, cardId);
@@ -3176,6 +3421,7 @@ function revealBestLearningCard() {
   const analyses = bestAnalysis(scenarioGame, 0, 112, { perfectKnowledge: true });
   state.learning.analyses = analyses;
   state.learning.selectedCardId = analyses[0]?.card.id || null;
+  state.learning.inspectedIllegalCard = null;
   state.stats.completedLessons += 1;
   saveProgress();
   render();
@@ -3184,6 +3430,7 @@ function revealBestLearningCard() {
 function switchScenario(index) {
   state.learning.scenarioIndex = index;
   state.learning.selectedCardId = null;
+  state.learning.inspectedIllegalCard = null;
   state.learning.analyses = [];
   render();
 }
@@ -3365,11 +3612,18 @@ function renderCardButton(card, options = {}) {
     selected = false,
     legal = true,
     best = false,
+    inspected = false,
     action = "",
     title = cardName(card),
   } = options;
 
-  const classes = [cardClass(card), selected ? "selected" : "", !legal ? "illegal" : "", best ? "best" : ""]
+  const classes = [
+    cardClass(card),
+    selected ? "selected" : "",
+    !legal ? "illegal" : "",
+    best ? "best" : "",
+    inspected ? "inspected" : "",
+  ]
     .filter(Boolean)
     .join(" ");
   const disabledAttr = disabled ? "disabled" : "";
@@ -3412,6 +3666,88 @@ function renderMiniCard(card) {
       <span class="mini-top"><span>${escapeHtml(cornerLabel)}</span><span>${escapeHtml(cornerSuit)}</span></span>
       <span class="mini-face">${escapeHtml(card.type === "suit" ? card.symbol : card.type === "trump" ? card.label : "☾")}</span>
       <span class="mini-label">${escapeHtml(card.type === "suit" ? card.suitName : card.suitName)}</span>
+    </div>
+  `;
+}
+
+function tableCourtName(card) {
+  return {
+    V: "Valet",
+    C: "Cavalier",
+    D: "Dame",
+    R: "Roi",
+  }[card.rank] || "";
+}
+
+function tableCourtFigure(card) {
+  return {
+    V: "V",
+    C: "C",
+    D: "D",
+    R: "R",
+  }[card.rank] || card.label;
+}
+
+function renderTableCardBody(card) {
+  if (card.type === "suit") {
+    const pipCount = Number(card.rank);
+    if (Number.isInteger(pipCount) && pipCount >= 1 && pipCount <= 10) {
+      return `
+        <span class="table-card-body table-card-pip">
+          <span class="table-card-jumbo">${escapeHtml(card.label)}</span>
+          <span class="table-card-symbol">${escapeHtml(card.symbol)}</span>
+        </span>
+      `;
+    }
+
+    return `
+      <span class="table-card-body table-card-court">
+        <span class="table-court-figure">${escapeHtml(tableCourtFigure(card))}</span>
+        <span class="table-court-title">${escapeHtml(tableCourtName(card))}</span>
+        <span class="table-card-symbol">${escapeHtml(card.symbol)}</span>
+      </span>
+    `;
+  }
+
+  if (card.type === "trump") {
+    return `
+      <span class="table-card-body table-card-trump">
+        <span class="table-card-jumbo">${escapeHtml(card.label)}</span>
+        <span class="table-court-title">Atout</span>
+      </span>
+    `;
+  }
+
+  return `
+    <span class="table-card-body table-card-excuse">
+      <span class="table-card-jumbo">☾</span>
+      <span class="table-court-title">Excuse</span>
+    </span>
+  `;
+}
+
+function renderTableCard(card) {
+  const classes = ["mini-card", "table-card"];
+  if (card.color === "red") {
+    classes.push("red");
+  }
+  if (card.type === "suit") {
+    classes.push(`suit-${card.suit}`);
+  }
+  if (card.type === "trump") {
+    classes.push("trump");
+  }
+  if (card.type === "excuse") {
+    classes.push("excuse");
+  }
+  const cornerLabel = cardCornerLabel(card);
+  const cornerSuit = cardCornerSuit(card);
+
+  return `
+    <div class="${classes.join(" ")}" title="${escapeHtml(cardName(card))}" aria-label="${escapeHtml(cardName(card))}">
+      <span class="table-card-corner table-card-top"><span>${escapeHtml(cornerLabel)}</span><span>${escapeHtml(cornerSuit)}</span></span>
+      ${renderTableCardBody(card)}
+      <span class="table-card-corner table-card-bottom"><span>${escapeHtml(cornerLabel)}</span><span>${escapeHtml(cornerSuit)}</span></span>
     </div>
   `;
 }
@@ -3471,6 +3807,13 @@ function renderSettingsControls(options = {}) {
           .join("")}
       </select>
     </label>
+    <label class="control-select">
+      <span>Cartes</span>
+      <select data-action="set-card-size">
+        <option value="normal" ${state.settings.cardSize === "normal" ? "selected" : ""}>Standard</option>
+        <option value="large" ${state.settings.cardSize === "large" ? "selected" : ""}>Grandes</option>
+      </select>
+    </label>
     ${includeRestart ? `<button class="ghost-button" data-action="restart" title="Réinitialiser le mode courant">Recommencer</button>` : ""}
   `;
 }
@@ -3505,17 +3848,13 @@ function renderAppSidebar() {
       <nav class="mode-tabs sidebar-nav" aria-label="Modes">
         ${MODES.map(
           (mode) => `
-            <button class="mode-tab ${state.mode === mode.id ? "active" : ""}" data-action="set-mode" data-mode="${mode.id}" aria-pressed="${state.mode === mode.id ? "true" : "false"}" ${state.mode === mode.id ? 'aria-current="page"' : ""}>
+            <button class="mode-tab ${state.mode === mode.id ? "active" : ""}" data-action="set-mode" data-mode="${mode.id}" aria-label="${escapeHtml(mode.label)}" title="${escapeHtml(mode.label)}" aria-pressed="${state.mode === mode.id ? "true" : "false"}" ${state.mode === mode.id ? 'aria-current="page"' : ""}>
               <span class="nav-icon" aria-hidden="true">${renderNavIcon(mode.icon)}</span>
               <span class="sidebar-label">${escapeHtml(mode.label)}</span>
             </button>
           `
         ).join("")}
       </nav>
-      <div class="sidebar-settings sidebar-label">
-        <h2>Réglages</h2>
-        <div class="top-actions side-settings-controls">${renderSettingsControls({ includeRestart: state.mode !== "home" })}</div>
-      </div>
     </aside>
   `;
 }
@@ -3600,13 +3939,14 @@ function turnContext(game) {
     };
   }
   if (game.phase === "ended") {
+    const userScore = game.finalScore ? playerFinalScore(game, 0) : 0;
     return {
       tone: "neutral",
       title: "Partie terminée",
       detail: game.finalScore
-        ? `${game.finalScore.success ? "Contrat gagné" : "Contrat chuté"}: ${formatPoints(
-            game.finalScore.signedScore
-          )} points de marque.`
+        ? `${game.finalScore.success ? "Contrat gagné" : "Contrat chuté"}: votre marque ${formatSignedPoints(
+            userScore
+          )}.`
         : "La donne est terminée.",
     };
   }
@@ -3674,9 +4014,12 @@ function currentActionContext(game) {
   }
   if (game.phase === "discard" && game.taker === 0) {
     const requiredDiscard = game.dogSize || 6;
+    const detail = game.inspectedIllegalCard
+      ? "Carte protégée: l'explication est affichée sous votre main."
+      : `Sélectionnez ${requiredDiscard} cartes autorisées pour l'écart.`;
     return {
       title: "À faire maintenant",
-      detail: `Sélectionnez ${requiredDiscard} cartes autorisées pour l'écart.`,
+      detail,
       action: {
         label: `Valider (${game.selectedDiscard.length}/${requiredDiscard})`,
         name: "confirm-discard",
@@ -3695,9 +4038,12 @@ function currentActionContext(game) {
     }
   }
   if (game.phase === "playing" && game.currentPlayer === 0 && !game.trickComplete) {
+    const detail = game.inspectedIllegalCard
+      ? "Carte bloquée: l'explication est affichée sous votre main."
+      : "Jouez une carte autorisée ou demandez l'analyse du coach.";
     return {
       title: "À faire maintenant",
-      detail: handRuleHint(game),
+      detail,
       action: coachAllowsHint() ? { label: "Analyser ma main", name: "hint", secondary: true } : null,
     };
   }
@@ -3813,7 +4159,7 @@ function renderFelt(game, contextText = "") {
   const showLastPlay = game.lastPlay && game.lastPlay.trickNumber === game.trickNumber;
 
   return `
-    <section class="felt phase-${escapeHtml(game.phase)}">
+    <section class="felt phase-${escapeHtml(game.phase)} players-${game.playerCount || game.players.length}">
       <div class="felt-status">
         <div>
           <strong>${escapeHtml(feltTitle)}</strong>
@@ -3849,7 +4195,7 @@ function renderFelt(game, contextText = "") {
               <span>${escapeHtml(player.name)}${player.team !== "undecided" ? ` · ${escapeHtml(roleLabel(game, index))}` : ""}</span>
               ${
                 card
-                  ? `<div class="played-slot-card"><span class="play-order">${entry.order}</span>${renderMiniCard(card)}</div>`
+                  ? `<div class="played-slot-card"><span class="play-order">${entry.order}</span>${renderTableCard(card)}</div>`
                   : `<div class="empty-slot"></div>`
               }
             </div>
@@ -3938,6 +4284,125 @@ function groupedHandCards(hand) {
     .filter((group) => group.cards.length > 0);
 }
 
+function userTurnNeedsFocus(game) {
+  return Boolean(game?.phase === "playing" && game.currentPlayer === 0 && !game.trickComplete);
+}
+
+function feedbackFromAnalysis(playedAnalysis, bestAnalysisResult) {
+  if (!playedAnalysis || !bestAnalysisResult) {
+    return {
+      tone: "info",
+      title: "Carte jouée",
+      detail: "Votre coup est enregistré. Le coach pourra l'expliquer après le pli.",
+      playedId: playedAnalysis?.card?.id || null,
+      bestId: bestAnalysisResult?.card?.id || null,
+      score: playedAnalysis?.score || 0,
+    };
+  }
+
+  const gap = bestAnalysisResult.score - playedAnalysis.score;
+  if (gap <= 6) {
+    return {
+      tone: "success",
+      title: "Bon choix",
+      detail: playedAnalysis.headline,
+      playedId: playedAnalysis.card.id,
+      bestId: bestAnalysisResult.card.id,
+      score: playedAnalysis.score,
+    };
+  }
+  if (gap <= 18) {
+    return {
+      tone: "warning",
+      title: "Jouable, mais améliorable",
+      detail: `${cardName(bestAnalysisResult.card)} était mieux évaluée (${bestAnalysisResult.score} contre ${playedAnalysis.score}).`,
+      playedId: playedAnalysis.card.id,
+      bestId: bestAnalysisResult.card.id,
+      score: playedAnalysis.score,
+    };
+  }
+  return {
+    tone: "danger",
+    title: "Coup coûteux",
+    detail: `Meilleur coup: ${cardName(bestAnalysisResult.card)} (${bestAnalysisResult.score} contre ${playedAnalysis.score}).`,
+    playedId: playedAnalysis.card.id,
+    bestId: bestAnalysisResult.card.id,
+    score: playedAnalysis.score,
+  };
+}
+
+function renderUserFeedback(game) {
+  const feedback = game.lastUserFeedback;
+  if (!feedback || feedback.trickNumber !== game.trickNumber) {
+    return "";
+  }
+
+  return `
+    <div class="turn-feedback ${escapeHtml(feedback.tone)}">
+      <div>
+        <span>Retour immédiat</span>
+        <strong>${escapeHtml(feedback.title)}</strong>
+        <p>${escapeHtml(feedback.detail)}</p>
+      </div>
+      ${Number.isFinite(feedback.score) ? `<b>${escapeHtml(feedback.score)}</b>` : ""}
+    </div>
+  `;
+}
+
+function renderIllegalInspection(game) {
+  const inspection = game.inspectedIllegalCard;
+  if (!inspection?.reason) {
+    return "";
+  }
+
+  return `
+    <div class="illegal-inspection">
+      <strong>${escapeHtml(inspection.title || "Carte non jouable")}</strong>
+      <p>${escapeHtml(inspection.reason)}</p>
+    </div>
+  `;
+}
+
+function renderFocusCoachSummary(game, hint) {
+  if (!hint || !userTurnNeedsFocus(game)) {
+    return "";
+  }
+  const selected = game.hint?.find((analysis) => analysis.card.id === game.hintSelectedId) || hint;
+  const best = game.hint?.[0] || hint;
+
+  return `
+    <section class="focus-coach-panel panel">
+      <div>
+        <span>Coach</span>
+        <strong>${escapeHtml(cardName(best.card))}</strong>
+        <p>${escapeHtml(selected.headline)}</p>
+      </div>
+      <button class="ghost-button" data-action="set-side-panel" data-panel="coach">Détails</button>
+    </section>
+  `;
+}
+
+function renderInlineReplaySummary(game) {
+  const review = game.trickReviews?.[0];
+  if (!review || game.phase === "ended") {
+    return "";
+  }
+
+  return `
+    <section class="inline-replay-panel panel">
+      <div>
+        <span>Dernier pli</span>
+        <strong>${escapeHtml(playerName(game, review.winner))} gagne le pli ${review.trickNumber}</strong>
+        <p>${formatPoints(review.trickPoints || 0)} point(s). ${escapeHtml(review.explanation || "")}</p>
+      </div>
+      <div class="inline-replay-actions">
+        <button class="ghost-button" data-action="set-side-panel" data-panel="coach">Revoir le pli</button>
+        <button class="ghost-button" data-action="set-side-panel" data-panel="history">Pourquoi ?</button>
+      </div>
+    </section>
+  `;
+}
+
 function renderHand(game, options = {}) {
   const hand = game.players[0].hand;
   const isDiscard = game.phase === "discard" && game.taker === 0;
@@ -3949,7 +4414,13 @@ function renderHand(game, options = {}) {
   const discardSuggestionIds = new Set(discardSuggestion.map((card) => card.id));
   const bestId = options.bestId || game.hint?.[0]?.card.id || null;
   const disabled = isDiscard ? false : game.phase !== "playing" || game.currentPlayer !== 0 || game.trickComplete || state.animating;
-  const canAskHint = !isDiscard && coachAllowsHint() && game.phase === "playing" && game.currentPlayer === 0 && !game.trickComplete;
+  const canAskHint =
+    !options.hideHintButton &&
+    !isDiscard &&
+    coachAllowsHint() &&
+    game.phase === "playing" &&
+    game.currentPlayer === 0 &&
+    !game.trickComplete;
   const ruleHint = isDiscard
     ? "Le coach surligne les cartes conseillées pour l'écart. Les rois et les bouts restent protégés sauf absence d'autre choix."
     : handRuleHint(game);
@@ -3969,9 +4440,10 @@ function renderHand(game, options = {}) {
   } else if (game.currentPlayer === 0) {
     help = "Choisissez une carte jouable. Une carte bloquée peut être cliquée pour rappeler la règle.";
   }
+  const inspectedCardId = game.inspectedIllegalCard?.cardId || null;
 
   return `
-    <section class="hand-panel panel">
+    <section class="hand-panel panel ${isDiscard ? "discard-hand-panel" : ""}">
       <div class="panel-body">
         <div class="hand-header">
           <div>
@@ -3990,6 +4462,8 @@ function renderHand(game, options = {}) {
           </div>
         </div>
         ${ruleHint ? `<div class="hand-rule-hint">${escapeHtml(ruleHint)}</div>` : ""}
+        ${renderIllegalInspection(game)}
+        ${renderUserFeedback(game)}
         ${renderHandActionBar(game, isDiscard, requiredDiscard)}
         <div class="hand grouped-hand">
           ${groupedHandCards(hand)
@@ -4001,10 +4475,11 @@ function renderHand(game, options = {}) {
                     ${group.cards
                       .map((card) =>
                         renderCardButton(card, {
-                          disabled: disabled || (isDiscard && !legalCards.has(card.id)),
+                          disabled,
                           legal: legalCards.has(card.id),
                           selected: isDiscard && game.selectedDiscard.includes(card.id),
                           best: isDiscard ? discardSuggestionIds.has(card.id) : bestId === card.id,
+                          inspected: inspectedCardId === card.id,
                           action: isDiscard ? "toggle-discard" : "play-card",
                           title: legalCards.has(card.id)
                             ? isDiscard && discardSuggestionIds.has(card.id)
@@ -4110,6 +4585,13 @@ function teamLabel(team) {
 function formatSignedPoints(points) {
   const sign = points >= 0 ? "+" : "-";
   return `${sign}${formatPoints(Math.abs(points))}`;
+}
+
+function formatScoredPoints(rawPoints, scoredPoints) {
+  if (rawPoints === scoredPoints) {
+    return formatPoints(rawPoints);
+  }
+  return `${formatPoints(rawPoints)} (compté ${formatPoints(scoredPoints)})`;
 }
 
 function userChoiceReviews(game) {
@@ -4314,6 +4796,15 @@ function renderFinalSummary(game) {
 
   const winnerLabel = teamLabel(final.winnerTeam);
   const userWon = game.players[0].team === final.winnerTeam;
+  const userScore = playerFinalScore(game, 0);
+  const takerScore = playerFinalScore(game, game.taker);
+  const defenderScore = -final.signedScore;
+  const takerPointText = formatScoredPoints(final.takerPoints, final.scoredTakerPoints ?? final.takerPoints);
+  const defensePointText = formatScoredPoints(final.defensePoints, final.scoredDefensePoints ?? final.defensePoints);
+  const scoringPointText =
+    final.takerPoints === final.scoredTakerPoints
+      ? `Il termine à ${formatPoints(final.takerPoints)}`
+      : `Il termine à ${formatPoints(final.takerPoints)}, compté ${formatPoints(final.scoredTakerPoints)} pour la marque`;
   const takerTeam = game.players.filter((player) => player.team === "taker").map((player) => player.name).join(", ");
   const defenseTeam = game.players.filter((player) => player.team === "defense").map((player) => player.name).join(", ");
   const petitText = game.petitAuBout
@@ -4336,23 +4827,25 @@ function renderFinalSummary(game) {
             <strong>${escapeHtml(winnerLabel)}</strong>
           </div>
           <div>
-            <span>Marque</span>
-            <strong>${escapeHtml(formatSignedPoints(final.signedScore))}</strong>
+            <span>Votre marque</span>
+            <strong>${escapeHtml(formatSignedPoints(userScore))}</strong>
           </div>
         </div>
         <div class="stat-grid final-score-grid">
           <div class="stat"><strong>${escapeHtml(playerName(game, game.taker))}</strong><span>Preneur</span></div>
           <div class="stat"><strong>${escapeHtml(final.contract)}</strong><span>Contrat</span></div>
-          <div class="stat"><strong>${formatPoints(final.takerPoints)} / ${formatPoints(final.target)}</strong><span>Points / objectif</span></div>
+          <div class="stat"><strong>${escapeHtml(`${takerPointText} / ${formatPoints(final.target)}`)}</strong><span>Points / objectif</span></div>
           <div class="stat"><strong>${escapeHtml(formatSignedPoints(final.delta))}</strong><span>Écart au contrat</span></div>
           <div class="stat"><strong>${final.bouts}</strong><span>Bouts preneur</span></div>
           <div class="stat"><strong>${escapeHtml(formatSignedPoints(final.petitBonus))}</strong><span>Petit au bout</span></div>
           <div class="stat"><strong>${escapeHtml(formatSignedPoints(final.handfulBonus))}</strong><span>Poignées</span></div>
-          <div class="stat"><strong>${formatPoints(final.defensePoints)}</strong><span>Points défense</span></div>
+          <div class="stat"><strong>${escapeHtml(defensePointText)}</strong><span>Points défense</span></div>
+          <div class="stat"><strong>${escapeHtml(formatSignedPoints(takerScore))}</strong><span>Marque preneur</span></div>
+          <div class="stat"><strong>${escapeHtml(formatSignedPoints(defenderScore))}</strong><span>Chaque défenseur</span></div>
         </div>
         <div class="final-section">
           <h3>Lecture de la donne</h3>
-          <p>Le preneur devait atteindre ${formatPoints(final.target)} points avec ${final.bouts} bout(s). Il termine à ${formatPoints(final.takerPoints)}, soit ${escapeHtml(formatSignedPoints(final.delta))} point(s) par rapport au contrat. ${escapeHtml(petitText)}</p>
+          <p>Le preneur devait atteindre ${formatPoints(final.target)} points avec ${final.bouts} bout(s). ${escapeHtml(scoringPointText)}, soit ${escapeHtml(formatSignedPoints(final.delta))} point(s) par rapport au contrat. ${escapeHtml(petitText)}</p>
           <div class="team-summary">
             <span><strong>Preneur</strong>${escapeHtml(takerTeam || "-")}</span>
             <span><strong>Défense</strong>${escapeHtml(defenseTeam || "-")}</span>
@@ -4482,6 +4975,9 @@ function renderPreviousTrickPanel(game) {
 function renderScoreTab(game, isGuided, target, contractName, bouts) {
   const takerTeam = game.players.filter((player) => player.team === "taker").map((player) => player.name).join(", ") || "-";
   const defenseTeam = game.players.filter((player) => player.team === "defense").map((player) => player.name).join(", ") || "-";
+  const final = game.finalScore;
+  const finalTakerPointText = final ? formatScoredPoints(final.takerPoints, final.scoredTakerPoints ?? final.takerPoints) : "";
+  const userScore = final ? playerFinalScore(game, 0) : 0;
   const topTricks = [...(game.trickReviews || [])]
     .sort((a, b) => (b.trickPoints || 0) - (a.trickPoints || 0))
     .slice(0, 3);
@@ -4515,10 +5011,10 @@ function renderScoreTab(game, isGuided, target, contractName, bouts) {
             .join("")}
         </div>
         ${
-          game.finalScore
+          final
             ? `<div class="hint-card best-hint score-breakdown">
-                <h3>${game.finalScore.success ? "Contrat gagné" : "Contrat chuté"}</h3>
-                <p>Le preneur termine à ${formatPoints(game.finalScore.takerPoints)} / ${formatPoints(game.finalScore.target)}, soit ${escapeHtml(formatSignedPoints(game.finalScore.delta))} point(s) par rapport à l'objectif. Marque finale: ${escapeHtml(formatSignedPoints(game.finalScore.signedScore))}.</p>
+                <h3>${final.success ? "Contrat gagné" : "Contrat chuté"}</h3>
+                <p>Le preneur termine à ${escapeHtml(finalTakerPointText)} / ${formatPoints(final.target)}, soit ${escapeHtml(formatSignedPoints(final.delta))} point(s) par rapport à l'objectif. Votre marque: ${escapeHtml(formatSignedPoints(userScore))}.</p>
               </div>`
             : `<div class="hint-card score-breakdown">
                 <h3>Score provisoire</h3>
@@ -4575,7 +5071,61 @@ function renderDiscardCoachPanel(game) {
   `;
 }
 
+function renderBiddingCoachPanel(game) {
+  const isUserTurn = game.bidding.currentPlayer === 0;
+  const advice = biddingAdvice(game, 0);
+  const recommendation = advice.recommended === PASS_BID ? "Passe" : CONTRACTS[advice.recommended].name;
+  const desired = advice.desired === PASS_BID ? "Passe" : CONTRACTS[advice.desired].name;
+  const highestBid = game.bidding.highestContractId
+    ? `${playerName(game, game.bidding.highestBidder)} tient ${CONTRACTS[game.bidding.highestContractId].name}`
+    : "Aucune enchère pour le moment";
+  const availableText = advice.options.length
+    ? advice.options.map((contractId) => CONTRACTS[contractId].name).join(", ")
+    : "Aucune montée disponible";
+
+  return `
+    <section class="panel bidding-coach-panel">
+      <div class="panel-header">
+        <div>
+          <h3>Avis d'enchère</h3>
+          <p>${escapeHtml(isUserTurn ? "Le coach évalue votre main avant l'annonce." : "Le coach prépare votre prochaine décision.")}</p>
+        </div>
+        <span class="pill gold">${escapeHtml(Math.round(advice.strength))}</span>
+      </div>
+      <div class="panel-body">
+        <div class="bidding-advice-card">
+          <span>Recommandation</span>
+          <strong>${escapeHtml(recommendation)}</strong>
+          <p>Lecture brute: ${escapeHtml(desired)}. ${escapeHtml(highestBid)}.</p>
+          ${
+            isUserTurn
+              ? `<button class="primary-button" data-action="place-bid" data-contract="${escapeHtml(advice.recommended)}">Choisir ${escapeHtml(recommendation)}</button>`
+              : ""
+          }
+        </div>
+        <div class="stat-grid bidding-advice-stats">
+          <div class="stat"><strong>${advice.stats.trumps}</strong><span>Atouts</span></div>
+          <div class="stat"><strong>${advice.stats.bouts}</strong><span>Bouts</span></div>
+          <div class="stat"><strong>${advice.stats.highTrumps}</strong><span>Gros atouts</span></div>
+          <div class="stat"><strong>${advice.stats.kings}</strong><span>Rois</span></div>
+        </div>
+        <p class="panel-copy">Enchères possibles: ${escapeHtml(availableText)}.</p>
+        <ul class="reason-list">
+          ${advice.reasons.map((reason) => `<li>${escapeHtml(reason)}</li>`).join("")}
+        </ul>
+      </div>
+    </section>
+  `;
+}
+
 function renderCoachTab(game, isGuided, hint) {
+  if (game.phase === "bidding") {
+    return `
+      ${renderBiddingCoachPanel(game)}
+      ${renderPreviousTrickPanel(game)}
+    `;
+  }
+
   if (game.phase === "discard" && game.taker === 0) {
     return `
       ${renderDiscardCoachPanel(game)}
@@ -4603,14 +5153,35 @@ function renderHistoryTab(game) {
   `;
 }
 
-function renderSidePanelTabs(panels, activePanel) {
+function sidePanelShortLabel(panel) {
+  return {
+    actions: "Act.",
+    coach: "Coach",
+    score: "Score",
+    history: "Hist.",
+    settings: "Régl.",
+  }[panel.id] || panel.label;
+}
+
+function renderSidePanelHeader(collapsed) {
+  return `
+    <div class="side-panel-header">
+      <span>${collapsed ? "Menu" : "Panneau"}</span>
+      <button class="icon-button side-panel-toggle" data-action="toggle-side-panel" aria-label="${collapsed ? "Ouvrir le panneau droit" : "Réduire le panneau droit"}" aria-expanded="${collapsed ? "false" : "true"}" title="${collapsed ? "Ouvrir le panneau droit" : "Réduire le panneau droit"}">
+        ${collapsed ? "<" : ">"}
+      </button>
+    </div>
+  `;
+}
+
+function renderSidePanelTabs(panels, activePanel, collapsed = false) {
   return `
     <div class="side-panel-tabs" role="tablist" aria-label="Menu de partie">
       ${panels
         .map(
           (panel) => `
-            <button class="side-panel-tab ${activePanel === panel.id ? "active" : ""}" data-action="set-side-panel" data-panel="${escapeHtml(panel.id)}" role="tab" aria-selected="${activePanel === panel.id ? "true" : "false"}">
-              ${escapeHtml(panel.label)}
+            <button class="side-panel-tab ${activePanel === panel.id ? "active" : ""}" data-action="set-side-panel" data-panel="${escapeHtml(panel.id)}" role="tab" aria-label="${escapeHtml(panel.label)}" title="${escapeHtml(panel.label)}" aria-selected="${activePanel === panel.id ? "true" : "false"}">
+              ${escapeHtml(collapsed ? sidePanelShortLabel(panel) : panel.label)}
             </button>
           `
         )
@@ -4621,9 +5192,6 @@ function renderSidePanelTabs(panels, activePanel) {
 
 function activeSidePanel(panels, game = null) {
   const available = new Set(panels.map((panel) => panel.id));
-  if (gameNeedsActionPanel(game) && available.has("actions")) {
-    return "actions";
-  }
   if (available.has(state.settings.sidePanel)) {
     return state.settings.sidePanel;
   }
@@ -4631,6 +5199,7 @@ function activeSidePanel(panels, game = null) {
 }
 
 function renderQuickActionsPanel(game) {
+  const isUserBidding = game.phase === "bidding" && game.bidding.currentPlayer === 0;
   const canAskHint =
     coachAllowsHint() &&
     game.phase === "playing" &&
@@ -4649,7 +5218,7 @@ function renderQuickActionsPanel(game) {
       <div class="panel-body">
         <div class="quick-action-grid">
           <button class="primary-button" data-action="restart">Redistribuer</button>
-          <button class="ghost-button" data-action="set-side-panel" data-panel="coach">Voir le coach</button>
+          <button class="ghost-button" data-action="set-side-panel" data-panel="coach">${isUserBidding ? "Avis d'enchère" : "Voir le coach"}</button>
           ${
             canAskHint
               ? `<button class="ghost-button" data-action="hint">Indice</button>`
@@ -4676,13 +5245,19 @@ function renderGameSidebar(game, isGuided, hint, target, contractName, bouts, ph
   ];
   const activePanel = activeSidePanel(panels, game);
   const activeBody = panels.find((panel) => panel.id === activePanel)?.body || panels[0]?.body || "";
+  const collapsed = state.settings.sidePanelCollapsed;
 
   return `
-    <aside class="side-stack game-side-panel">
-      ${renderSidePanelTabs(panels, activePanel)}
-      <section class="side-panel-content" role="tabpanel">
-        ${activeBody}
-      </section>
+    <aside class="side-stack game-side-panel ${collapsed ? "collapsed" : ""}" aria-label="Panneau de partie">
+      ${renderSidePanelHeader(collapsed)}
+      ${renderSidePanelTabs(panels, activePanel, collapsed)}
+      ${
+        collapsed
+          ? ""
+          : `<section class="side-panel-content" role="tabpanel">
+              ${activeBody}
+            </section>`
+      }
     </aside>
   `;
 }
@@ -4699,15 +5274,27 @@ function renderGameMode(mode) {
   const showPhasePanelInCenter = game.phase === "ended" || gameNeedsActionPanel(game);
   const centerPhasePanel = showPhasePanelInCenter ? phasePanel : "";
   const sidePhasePanel = showPhasePanelInCenter ? "" : phasePanel;
+  const nowPanel = renderNowPanel(game);
+  const handMarkup = game.phase === "ended" ? "" : renderHand(game, { hideHintButton: Boolean(nowPanel) });
+  const showInlineCoachSummary = state.settings.sidePanelCollapsed;
+  const focusMode = userTurnNeedsFocus(game) && !hint;
+  const hasCurrentUserFeedback = game.lastUserFeedback?.trickNumber === game.trickNumber;
+  const prioritizeHand =
+    focusMode ||
+    (game.phase === "discard" && game.taker === 0) ||
+    Boolean(game.phase === "playing" && hasCurrentUserFeedback && game.players[0].hand.length > 0);
 
   return `
-    <div class="workspace game-workspace">
-      <div class="table-zone game-table phase-${escapeHtml(game.phase)}">
+    <div class="workspace game-workspace ${state.settings.sidePanelCollapsed ? "side-panel-collapsed" : ""}">
+      <div class="table-zone game-table phase-${escapeHtml(game.phase)} ${prioritizeHand ? "user-action-priority" : ""}">
         ${renderTurnBanner(game)}
+        ${nowPanel}
         ${centerPhasePanel}
+        ${showInlineCoachSummary ? renderFocusCoachSummary(game, hint) : ""}
         ${renderFelt(game)}
         ${game.phase === "playing" ? renderTrickSequence(game) : ""}
-        ${game.phase === "ended" ? "" : renderHand(game)}
+        ${handMarkup}
+        ${renderInlineReplaySummary(game)}
       </div>
       ${renderGameSidebar(game, isGuided, hint, target, contractName, bouts, sidePhasePanel)}
     </div>
@@ -4937,9 +5524,10 @@ function renderLearningMode() {
   const selectedAnalysis = analyses.find((analysis) => analysis.card.id === selectedId) || analyses[0];
   const bestId = analyses[0]?.card.id;
   const legalCards = new Set(getLegalCards(game.players[0].hand, game.trick).map((card) => card.id));
+  const inspectedLearningCardId = state.learning.inspectedIllegalCard?.cardId || null;
 
   return `
-    <div class="workspace learn">
+    <div class="workspace learn ${state.settings.sidePanelCollapsed ? "side-panel-collapsed" : ""}">
       <aside class="panel scenario-panel">
         <div class="panel-header">
           <div>
@@ -4975,7 +5563,6 @@ function renderLearningMode() {
             <button class="primary-button" data-action="reveal-best">Voir le meilleur choix</button>
           </div>
         </section>
-        ${renderFelt(game, scenario.goal)}
         <section class="hand-panel panel action-panel">
           <div class="panel-body">
             <div class="hand-header">
@@ -4984,14 +5571,16 @@ function renderLearningMode() {
                 <p>Cliquez une carte pour comparer sa pertinence avec les simulations.</p>
               </div>
             </div>
+            ${renderIllegalInspection({ inspectedIllegalCard: state.learning.inspectedIllegalCard })}
             <div class="hand">
               ${game.players[0].hand
                 .map((card) =>
                   renderCardButton(card, {
                     selected: selectedId === card.id,
                     legal: legalCards.has(card.id),
-                    disabled: !legalCards.has(card.id),
+                    disabled: false,
                     best: state.learning.analyses.length > 0 && bestId === card.id,
+                    inspected: inspectedLearningCardId === card.id,
                     action: "select-learning-card",
                     title: legalCards.has(card.id) ? cardName(card) : illegalReason(card, game.players[0].hand, game.trick),
                   })
@@ -5000,29 +5589,47 @@ function renderLearningMode() {
             </div>
           </div>
         </section>
-      </main>
-
-      <aside class="side-stack">
         ${
           analyses.length > 0
-            ? renderAnalysisPanel(analyses, selectedAnalysis?.card.id, "Simulation du choix", "learn")
-            : renderLearningPromptPanel(scenario)
+            ? `<div class="learning-result-panel">${renderAnalysisPanel(
+                analyses,
+                selectedAnalysis?.card.id,
+                "Simulation du choix",
+                "learn"
+              )}</div>`
+            : ""
         }
-        <section class="panel">
-          <div class="panel-header">
-            <div>
-              <h3>Objectif tactique</h3>
-              <p>${escapeHtml(scenario.goal)}</p>
-            </div>
-          </div>
-          <div class="panel-body">
-            <ul class="reason-list">
-              <li>Le score combine légalité, probabilité de prendre le pli et valeur des points sauvés.</li>
-              <li>Les simulations rejouent la fin du pli avec des adversaires légèrement variables.</li>
-              <li>Le but n'est pas de mémoriser une carte, mais d'apprendre le raisonnement.</li>
-            </ul>
-          </div>
-        </section>
+        ${renderFelt(game, scenario.goal)}
+      </main>
+
+      <aside class="side-stack learning-side-panel ${state.settings.sidePanelCollapsed ? "collapsed" : ""}" aria-label="Panneau d'apprentissage">
+        ${renderSidePanelHeader(state.settings.sidePanelCollapsed)}
+        ${
+          state.settings.sidePanelCollapsed
+            ? ""
+            : `<section class="side-panel-content">
+                ${
+                  analyses.length > 0
+                    ? ""
+                    : renderLearningPromptPanel(scenario)
+                }
+                <section class="panel">
+                  <div class="panel-header">
+                    <div>
+                      <h3>Objectif tactique</h3>
+                      <p>${escapeHtml(scenario.goal)}</p>
+                    </div>
+                  </div>
+                  <div class="panel-body">
+                    <ul class="reason-list">
+                      <li>Le score combine légalité, probabilité de prendre le pli et valeur des points sauvés.</li>
+                      <li>Les simulations rejouent la fin du pli avec des adversaires légèrement variables.</li>
+                      <li>Le but n'est pas de mémoriser une carte, mais d'apprendre le raisonnement.</li>
+                    </ul>
+                  </div>
+                </section>
+              </section>`
+        }
       </aside>
     </div>
   `;
@@ -5170,8 +5777,46 @@ function renderAnalysisPanel(analyses, selectedId, title, context) {
   `;
 }
 
+function homeRecommendation(stats) {
+  if (stats.learningAttempts < 3) {
+    return {
+      title: "Prochaine étape: apprendre les cartes jouables",
+      text: "Commencez par quelques scénarios courts avant une donne complète.",
+      action: "Faire un exercice",
+      actionType: "set-mode",
+      mode: "learn",
+    };
+  }
+  if (stats.gamesFinished === 0) {
+    return {
+      title: "Prochaine étape: première partie guidée",
+      text: "Le coach vous accompagne sur les enchères, le chien, l'écart et les premiers plis.",
+      action: "Première partie",
+      actionType: "first-game",
+      mode: "guided",
+    };
+  }
+  if (stats.cumulativeCoachGap > 80) {
+    return {
+      title: "Prochaine étape: revoir les choix coûteux",
+      text: "Vos derniers écarts avec le coach indiquent que le replay et les analyses seront utiles.",
+      action: "Continuer guidé",
+      actionType: "set-mode",
+      mode: "guided",
+    };
+  }
+  return {
+    title: "Prochaine étape: consolider en partie libre",
+    text: "Vous avez les bases. Jouez une donne contre l'ordinateur et gardez l'analyse après coup.",
+    action: "Jouer libre",
+    actionType: "set-mode",
+    mode: "versus",
+  };
+}
+
 function renderHomeMode() {
   const stats = sanitizeProgress(state.stats);
+  const recommendation = homeRecommendation(stats);
   const resumableGames = ["guided", "versus"]
     .map((mode) => ({ mode, game: state.games[mode] }))
     .filter((entry) => isResumableGame(entry.game));
@@ -5205,6 +5850,19 @@ function renderHomeMode() {
       actionType: "set-mode",
     },
   ];
+  const settingsPanel = `
+    <section class="panel home-settings-panel">
+      <div class="panel-header">
+        <div>
+          <h2>Préférences de table</h2>
+          <p>Ces réglages s'appliqueront aux prochaines donnes.</p>
+        </div>
+      </div>
+      <div class="panel-body">
+        <div class="top-actions side-settings-controls home-settings-grid">${renderSettingsControls({ includeRestart: false })}</div>
+      </div>
+    </section>
+  `;
 
   return `
     <div class="home-workspace">
@@ -5220,6 +5878,15 @@ function renderHomeMode() {
           <div class="stat"><strong>${stats.userWins}</strong><span>Victoires joueur</span></div>
         </div>
       </section>
+      <section class="home-next-step panel">
+        <div>
+          <span class="pill gold">Recommandé</span>
+          <h2>${escapeHtml(recommendation.title)}</h2>
+          <p>${escapeHtml(recommendation.text)}</p>
+        </div>
+        <button class="primary-button" data-action="${escapeHtml(recommendation.actionType)}" data-mode="${escapeHtml(recommendation.mode)}">${escapeHtml(recommendation.action)}</button>
+      </section>
+      ${settingsPanel}
       ${
         resumableGames.length > 0
           ? `<section class="resume-panel panel" aria-label="Donnes en cours">
@@ -5260,7 +5927,9 @@ function renderHomeMode() {
                 <div class="home-card-actions">
                   <button class="primary-button" data-action="${escapeHtml(mode.actionType)}" data-mode="${escapeHtml(mode.id)}">${escapeHtml(mode.action)}</button>
                   ${
-                    (mode.id === "guided" || mode.id === "versus") && isResumableGame(state.games[mode.id])
+                    mode.actionType !== "first-game" &&
+                    (mode.id === "guided" || mode.id === "versus") &&
+                    isResumableGame(state.games[mode.id])
                       ? `<button class="ghost-button" data-action="new-game" data-mode="${escapeHtml(mode.id)}">Nouvelle donne</button>`
                       : ""
                   }
@@ -5269,17 +5938,6 @@ function renderHomeMode() {
             `
           )
           .join("")}
-      </section>
-      <section class="panel home-settings-panel">
-        <div class="panel-header">
-          <div>
-            <h2>Préférences de table</h2>
-            <p>Ces réglages s'appliqueront aux prochaines donnes.</p>
-          </div>
-        </div>
-        <div class="panel-body">
-          <div class="top-actions side-settings-controls home-settings-grid">${renderSettingsControls({ includeRestart: false })}</div>
-        </div>
       </section>
     </div>
   `;
@@ -5292,7 +5950,7 @@ function renderStrategyMode() {
         <div class="panel-header">
           <div>
             <h2>Stratégies à travailler</h2>
-            <p>Ce mode sert de feuille de route pour enrichir le jeu: enchère, chien, attaque, défense et fin de manche.</p>
+            <p>Choisissez une situation typique, jouez l'exercice lié, puis revenez ici pour consolider le raisonnement.</p>
           </div>
         </div>
       </section>
@@ -5310,16 +5968,16 @@ function renderStrategyMode() {
       <section class="panel">
         <div class="panel-header">
           <div>
-            <h2>Modes prévus</h2>
-            <p>La base actuelle se concentre sur les plis. Les extensions naturelles sont déjà séparées par mode.</p>
+            <h2>Axes d'entraînement</h2>
+            <p>Travaillez une habitude à la fois pendant vos prochaines donnes guidées.</p>
           </div>
         </div>
         <div class="panel-body">
           <ul class="reason-list">
-            <li>Partie complète: enchères, chien, preneur contre défense, poignée et petit au bout.</li>
-            <li>Défis: positions fixes avec objectif de score ou de sauvetage du Petit.</li>
-            <li>Analyse après coup: revoir chaque pli avec le meilleur coup simulé.</li>
-            <li>Niveaux: débutant, normal et fort, avec des choix plus ou moins précis et aléatoires.</li>
+            <li>Avant d'enchérir: compter les bouts, les atouts et les longues utiles.</li>
+            <li>Pendant l'écart: retirer les pertes évidentes sans exposer les rois ni les bouts.</li>
+            <li>En défense: protéger les points quand un partenaire tient déjà le pli.</li>
+            <li>Après la donne: relire les plis où le coach détecte le plus gros écart.</li>
           </ul>
         </div>
       </section>
@@ -5342,12 +6000,16 @@ function handleAppClick(event) {
 
   if (action === "set-mode") {
     setMode(target.dataset.mode);
+  } else if (action === "first-game") {
+    startFirstGame();
   } else if (action === "new-game") {
     startNewGameMode(target.dataset.mode);
   } else if (action === "scroll-hand") {
     scrollHandFromControl(target, Number(target.dataset.direction) || 1);
   } else if (action === "toggle-nav") {
     toggleNavigation();
+  } else if (action === "toggle-side-panel") {
+    toggleSidePanelCollapsed();
   } else if (action === "restart") {
     restartCurrent();
   } else if (action === "hint") {
@@ -5407,6 +6069,8 @@ function handleAppChange(event) {
     setOpponentLevel(target.value);
   } else if (target.dataset.action === "set-coach-mode") {
     setCoachMode(target.value);
+  } else if (target.dataset.action === "set-card-size") {
+    setCardSize(target.value);
   }
 }
 
@@ -5664,7 +6328,7 @@ function render() {
       : ` mode-${state.mode}`;
 
   app.innerHTML = `
-    <div class="app-shell ${state.settings.navCollapsed ? "sidebar-collapsed" : ""}${phaseClass}">
+    <div class="app-shell ${state.settings.navCollapsed ? "sidebar-collapsed" : ""} card-size-${escapeHtml(state.settings.cardSize)}${phaseClass}">
       ${renderAppSidebar()}
       <main class="main${phaseClass}">${content}</main>
     </div>
@@ -5700,9 +6364,11 @@ window.CoachTarot = {
   resolveTrick,
   settlePendingExcuseCompensations,
   calculateFinalScore,
+  playerFinalScore,
   teamPoints,
   countBouts,
   targetForBouts,
+  scoringTakerPoints,
   cardById,
   bestAnalysis,
   evaluateHandForBid,
