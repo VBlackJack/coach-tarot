@@ -6148,18 +6148,22 @@ function bindDogTestSequence() {
   dogTestKeydownBound = true;
 }
 
+const HAND_WHEEL_HANDLED = "__coachTarotHandWheelHandled";
+
 function wheelDeltaPixels(event, hand) {
   const dominantDelta = Math.abs(event.deltaY) >= Math.abs(event.deltaX) ? event.deltaY : event.deltaX;
+  let pixels = dominantDelta;
   if (event.deltaMode === 1) {
-    return dominantDelta * 36;
+    pixels *= 36;
+  } else if (event.deltaMode === 2) {
+    pixels *= hand.clientWidth;
   }
-  if (event.deltaMode === 2) {
-    return dominantDelta * hand.clientWidth;
-  }
-  return dominantDelta;
+
+  const maxStep = Math.max(80, Math.min(260, hand.clientWidth * 0.38));
+  return Math.max(-maxStep, Math.min(maxStep, pixels));
 }
 
-function temporarilyDisableHandSnap(hand) {
+function temporarilyDisableHandSnap(hand, restoreDelay = 180) {
   if (!hand) {
     return;
   }
@@ -6176,21 +6180,26 @@ function temporarilyDisableHandSnap(hand) {
     hand.style.scrollSnapType = hand.dataset.snapRestoreValue || "";
     delete hand.dataset.snapRestoreValue;
     hand._snapRestoreTimer = null;
-  }, 180);
+  }, restoreDelay);
 }
 
-function scrollHandBy(hand, delta, smooth = false) {
+function scrollHandBy(hand, delta, options = {}) {
   if (!hand || hand.scrollWidth <= hand.clientWidth) {
     return false;
   }
 
+  const smooth = typeof options === "boolean" ? options : Boolean(options.smooth);
+  const snapRestoreDelay =
+    typeof options === "object" && Number.isFinite(options.snapRestoreDelay)
+      ? Math.max(180, options.snapRestoreDelay)
+      : 180;
   const maxScroll = hand.scrollWidth - hand.clientWidth;
   const nextScroll = Math.max(0, Math.min(maxScroll, hand.scrollLeft + delta));
   if (nextScroll === hand.scrollLeft) {
     return false;
   }
 
-  temporarilyDisableHandSnap(hand);
+  temporarilyDisableHandSnap(hand, snapRestoreDelay);
   if (smooth && typeof hand.scrollTo === "function") {
     hand.scrollTo({ left: nextScroll, behavior: "auto" });
   } else {
@@ -6206,11 +6215,14 @@ function scrollHandFromControl(control, direction) {
     return;
   }
 
-  scrollHandBy(hand, direction * Math.max(220, hand.clientWidth * 0.72), true);
+  scrollHandBy(hand, direction * Math.max(220, hand.clientWidth * 0.72), {
+    smooth: true,
+    snapRestoreDelay: 320,
+  });
 }
 
 function handleWheelForHand(event, hand) {
-  if (!hand || hand.scrollWidth <= hand.clientWidth) {
+  if (event?.[HAND_WHEEL_HANDLED] || !hand || hand.scrollWidth <= hand.clientWidth) {
     return false;
   }
 
@@ -6219,8 +6231,9 @@ function handleWheelForHand(event, hand) {
     return false;
   }
 
-  const moved = scrollHandBy(hand, delta);
+  const moved = scrollHandBy(hand, delta, { snapRestoreDelay: 700 });
   if (moved && typeof event.preventDefault === "function") {
+    event[HAND_WHEEL_HANDLED] = true;
     event.preventDefault();
     event.stopPropagation();
   }

@@ -1,11 +1,11 @@
 "use strict";
 
-const CACHE_NAME = "coach-tarot-v33";
+const CACHE_NAME = "coach-tarot-v34";
 const APP_ASSETS = [
   "./",
   "./index.html",
-  "./styles.css?v=33",
-  "./app.js?v=33",
+  "./styles.css?v=34",
+  "./app.js?v=34",
   "./manifest.webmanifest",
   "./icon.svg",
 ];

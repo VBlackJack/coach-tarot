@@ -1971,7 +1971,7 @@ button {
   overflow-x: auto;
   overflow-y: visible;
   padding: 10px 2px 16px;
-  scroll-snap-type: x proximity;
+  scroll-snap-type: none;
   scrollbar-width: auto;
   scrollbar-color: var(--accent) rgba(241, 243, 251, 0.12);
   overscroll-behavior-x: contain;
@@ -2006,7 +2006,7 @@ button {
   align-content: start;
   gap: 6px;
   min-width: 0;
-  scroll-snap-align: start;
+  scroll-snap-align: none;
 }
 
 .hand-group-label {
